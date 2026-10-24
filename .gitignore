@@ -1,0 +1,29 @@
+# ---- 运行时数据（含个人路径、参考音频、台词，绝不入库）----
+data/
+dist/
+build/
+*.log
+*.tmp
+
+# ---- 内部设计文档（含本机路径与项目内情）----
+CONTRACT.md
+_probe/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 发布产物 ----
+*.zip
+!launch.bat
+
+# ---- 编辑器/系统 ----
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
