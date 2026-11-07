@@ -177,6 +177,93 @@ def merge_wavs(paths: list[str], dst: str, ffmpeg: str) -> str:
             pass
 
 
+# 一键快速效果（ffmpeg 滤镜预设）：给"不想开 AU 也能马上听效果"的用户一个轻量选项。
+# 想精细调节（混响时间、EQ、压缩等）仍然点「放入 AU」交给 Audition。
+EFFECT_PRESETS = (
+    ("room", "小房间混响", "aecho=0.8:0.85:35|65:0.35|0.22"),
+    ("hall", "大厅混响", "aecho=0.8:0.9:80|160|240:0.4|0.3|0.2"),
+    ("delay", "延迟回声", "aecho=0.85:0.9:350:0.35"),
+    ("loudness", "音量标准化", "dynaudnorm=f=200:g=15"),
+)
+
+# 应用效果时在文件名后追加的后缀（保持原名可追溯）
+EFFECT_SUFFIXES = {
+    "room": "_混响",
+    "hall": "_大厅混响",
+    "delay": "_延迟",
+    "loudness": "_标准音量",
+}
+
+
+def effect_filter(preset: str) -> str:
+    """按预设 key 返回 ffmpeg 滤镜串；未知 preset 返回空串。"""
+    text = str(preset or "").strip().lower()
+    for key, _label, value in EFFECT_PRESETS:
+        if key == text:
+            return value
+    return ""
+
+
+def effect_label(preset: str) -> str:
+    """按预设 key 返回中文名；未知返回原值。"""
+    text = str(preset or "").strip().lower()
+    for key, label, _value in EFFECT_PRESETS:
+        if key == text:
+            return label
+    return str(preset or "")
+
+
+def apply_effect(src: str, dst: str, preset: str, ffmpeg: str) -> str:
+    """对音频套一个简单效果（混响/延迟/音量标准化），输出仍是 48kHz/16bit/单声道。
+
+    失败抛 AudioError（含 ffmpeg stderr 尾部），不会留下半成品输出。
+    """
+    tool = _resolve_exe(ffmpeg, "ffmpeg")
+    if not tool:
+        raise AudioError(
+            "未找到 ffmpeg：请确认已设置 GPT-SoVITS 根目录（其中应含 runtime\\ffmpeg.exe），"
+            "或系统 PATH 中可执行 ffmpeg"
+        )
+    chain = effect_filter(preset)
+    if not chain:
+        raise AudioError("未知的快速效果预设：%s" % preset)
+    src_path = str(src or "").strip()
+    if not src_path or not Path(src_path).is_file():
+        raise AudioError("源音频不存在：%s" % (src_path or "(空)"))
+    dst_text = str(dst or "").strip()
+    if not dst_text:
+        raise AudioError("输出文件路径为空")
+    target = Path(dst_text)
+    if not target.is_absolute():
+        target = target.absolute()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    command = [
+        tool,
+        "-y",
+        "-i",
+        src_path,
+        "-af",
+        chain,
+        "-ar",
+        "48000",
+        "-ac",
+        "1",
+        "-c:a",
+        "pcm_s16le",
+        str(target),
+    ]
+    result = _run(command, CONVERT_TIMEOUT, "ffmpeg")
+    if result.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
+        try:
+            if target.is_file():
+                target.unlink()
+        except OSError:
+            pass
+        raise AudioError("ffmpeg 处理失败：%s" % (_tail(_decode(result.stderr)) or "未知错误"))
+    return str(target)
+
+
 def probe(path: str, ffprobe: str) -> dict:
     """返回 {"duration", "sample_rate", "channels", "codec_name"}。"""
     tool = _resolve_exe(ffprobe, "ffprobe")

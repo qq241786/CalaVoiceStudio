@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -20,9 +21,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from calavoice import launcher
+from calavoice import launcher, paths
+from calavoice.audio import EFFECT_PRESETS, apply_effect, effect_label, probe
 from calavoice.profiles import VoiceProfile, load_profiles
-from calavoice.script_model import ScriptRow, load_rows, save_rows
+from calavoice.script_model import ScriptRow, load_rows, make_out_name, save_rows
 from calavoice.ui.widgets import LANG_ITEMS, make_button, select_combo, setup_table
 from calavoice.ui.worker import (
     STATUS_DONE,
@@ -32,6 +34,7 @@ from calavoice.ui.worker import (
     STATUS_WAIT,
     GenerateWorker,
     PreviewWorker,
+    TaskWorker,
     friendly_error,
     material_sound_dir,
     resolve_tool,
@@ -61,6 +64,7 @@ class ScriptPage(QWidget):
         self.rows: list[ScriptRow] = []
         self.worker: GenerateWorker | None = None
         self.preview: PreviewWorker | None = None
+        self.fx_worker: TaskWorker | None = None
         self._profile_names: list[str] = []
         self._loading = False
         self._busy = False
@@ -124,8 +128,25 @@ class ScriptPage(QWidget):
         bottom.setSpacing(6)
         self.btn_preview = make_button("试听选中", icon_name="volume", tooltip="合成并播放选中行")
         self.btn_output_dir = make_button("打开输出目录", icon_name="folder")
+        self.btn_au = make_button(
+            "放入 AU",
+            icon_name="volume",
+            tooltip="用 Adobe Audition 打开选中行（没选中则打开全部已生成的语音），在 AU 里加混响/延迟后保存",
+        )
+        self.fx_combo = QComboBox(self)
+        self.fx_combo.setMinimumWidth(120)
+        for key, label, _chain in EFFECT_PRESETS:
+            self.fx_combo.addItem(label, key)
+        self.btn_apply_fx = make_button(
+            "应用效果",
+            icon_name="sliders",
+            tooltip="对选中行（没选中则全部已生成）套用上面的快速效果；原文件备份为 *.original.wav",
+        )
         bottom.addWidget(self.btn_preview)
         bottom.addWidget(self.btn_output_dir)
+        bottom.addWidget(self.btn_au)
+        bottom.addWidget(self.fx_combo)
+        bottom.addWidget(self.btn_apply_fx)
         bottom.addStretch(1)
         self.hint = QLabel("提示：双击单元格可编辑；语言留「跟随档案」即使用档案设置。", self)
         self.hint.setObjectName("HintLabel")
@@ -141,6 +162,8 @@ class ScriptPage(QWidget):
         self.btn_stop.clicked.connect(self.stop_generate)
         self.btn_preview.clicked.connect(self.preview_selected)
         self.btn_output_dir.clicked.connect(self.open_output_dir)
+        self.btn_au.clicked.connect(self.send_to_au)
+        self.btn_apply_fx.clicked.connect(self.apply_quick_effect)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self._update_buttons()
@@ -591,8 +614,12 @@ class ScriptPage(QWidget):
 
     def _update_buttons(self) -> None:
         has_selection = bool(self._selected_row_indexes())
+        fx_busy = self.fx_worker is not None and self.fx_worker.isRunning()
         self.btn_preview.setEnabled(has_selection and not self._busy)
         self.btn_stop.setEnabled(self._busy)
+        self.btn_au.setEnabled(not self._busy and not fx_busy)
+        self.btn_apply_fx.setEnabled(not self._busy and not fx_busy)
+        self.fx_combo.setEnabled(not self._busy and not fx_busy)
 
     def is_busy(self) -> bool:
         return self._busy
@@ -656,6 +683,178 @@ class ScriptPage(QWidget):
             launcher.open_folder(str(target))
         except Exception as exc:
             QMessageBox.warning(self, "无法打开目录", friendly_error(exc))
+
+    # ---------- 一键放入 AU / 快速效果 ----------
+
+    def _audio_path_for_row(self, row: ScriptRow) -> str:
+        """取一行的语音文件：优先用状态列记录的真实路径，否则按导出规则推导。"""
+        recorded = str(row.message or "").strip()
+        if (
+            row.status == STATUS_DONE
+            and recorded.lower().endswith(".wav")
+            and Path(recorded).is_file()
+        ):
+            return recorded
+        try:
+            sound_dir = material_sound_dir(self.cfg)
+        except Exception:
+            return ""
+        try:
+            name = make_out_name(row, row.profile or self.current_profile())
+        except Exception:
+            return ""
+        candidate = Path(sound_dir) / name
+        return str(candidate) if candidate.is_file() else ""
+
+    def _target_audio_files(self) -> list[str]:
+        """选中的行优先；没有选中则取全部已生成的语音。"""
+        self._sync_from_table()
+        selected = self._selected_row_indexes()
+        if selected:
+            rows = [self.rows[index] for index in selected if 0 <= index < len(self.rows)]
+        else:
+            rows = list(self.rows)
+        files: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            path = self._audio_path_for_row(row)
+            if not path:
+                continue
+            key = path.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(path)
+        return files
+
+    def send_to_au(self) -> None:
+        """一键把生成的语音交给 Adobe Audition（混响/延迟等效果在 AU 里做，保存即生效）。"""
+        files = self._target_audio_files()
+        if not files:
+            QMessageBox.information(
+                self,
+                "没有可发送的语音",
+                "先生成台词（状态为「完成」），或在表格里选中已生成的行再点「放入 AU」。",
+            )
+            return
+        try:
+            exe = str(paths.resolve_audition_exe(self.cfg) or "")
+        except Exception:
+            exe = ""
+        if not exe:
+            QMessageBox.warning(
+                self,
+                "未找到 Audition",
+                "没有找到 Adobe Audition。\n请到「设置」页手动选择 Adobe Audition.exe，或点「自动检测」。",
+            )
+            return
+        try:
+            pid = launcher.open_in_tool(exe, files)
+        except Exception as exc:
+            QMessageBox.warning(self, "打开 AU 失败", friendly_error(exc))
+            return
+        self.log.emit("已把 %d 个语音放进 Adobe Audition（进程 %s）：%s" % (len(files), pid, exe))
+        for path in files[:20]:
+            self.log.emit("  音频：%s" % path)
+        if len(files) > 20:
+            self.log.emit("  …另有 %d 个" % (len(files) - 20))
+        self.hint.setText("已放入 AU：%d 条。在 AU 里加混响/延迟后保存即可。" % len(files))
+
+    def apply_quick_effect(self) -> None:
+        """在软件内一键套用简单效果（混响/延迟/音量标准化），不用开 AU。"""
+        if self.fx_worker is not None and self.fx_worker.isRunning():
+            self.log.emit("快速效果正在处理中，请稍候。")
+            return
+        preset = str(self.fx_combo.currentData() or "")
+        if not preset:
+            QMessageBox.information(self, "未选择效果", "请先在「应用效果」左边选一个效果。")
+            return
+        files = self._target_audio_files()
+        if not files:
+            QMessageBox.information(
+                self,
+                "没有可处理的语音",
+                "先生成台词（状态为「完成」），或在表格里选中已生成的行再点「应用效果」。",
+            )
+            return
+        label = effect_label(preset)
+        answer = QMessageBox.question(
+            self,
+            "应用快速效果",
+            "将对 %d 个语音套用「%s」，并覆盖原文件。\n"
+            "原文件会备份为同名 *.original.wav（只备份一次，可随时找回）。\n\n继续？" % (len(files), label),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.fx_worker = TaskWorker(
+            lambda progress: _apply_effect_to_files(self.cfg, files, preset, progress),
+            pass_progress=True,
+            parent=self,
+        )
+        self.fx_worker.progress.connect(self.log.emit)
+        self.fx_worker.done.connect(self._on_fx_done)
+        self.fx_worker.failed.connect(self._on_fx_failed)
+        self.fx_worker.finished.connect(self._update_buttons)
+        self._update_buttons()
+        self.hint.setText("正在套用「%s」，共 %d 条…" % (label, len(files)))
+        self.log.emit("开始套用快速效果「%s」，共 %d 条。" % (label, len(files)))
+        self.fx_worker.start()
+
+    def _on_fx_done(self, result) -> None:
+        data = result if isinstance(result, dict) else {}
+        done = int(data.get("done") or 0)
+        failed = list(data.get("failed") or [])
+        message = "快速效果完成：成功 %d 条，失败 %d 条。" % (done, len(failed))
+        self.log.emit(message)
+        self.hint.setText(message)
+        for name, reason in failed[:10]:
+            self.log.emit("  失败：%s（%s）" % (name, reason))
+        if failed:
+            QMessageBox.warning(
+                self, "部分失败", message + "\n\n" + "\n".join("%s：%s" % item for item in failed[:5])
+            )
+        else:
+            QMessageBox.information(
+                self, "完成", message + "\n\n处理后的文件已在输出目录，原文件备份为 *.original.wav。"
+            )
+
+    def _on_fx_failed(self, message: str) -> None:
+        self.log.emit("快速效果失败：%s" % message)
+        self.hint.setText("快速效果失败")
+        QMessageBox.warning(self, "处理失败", message)
+
+
+def _apply_effect_to_files(cfg, files, preset: str, progress=None) -> dict:
+    """后台线程里逐个套效果：备份原文件 → 生成临时文件 → 校验 48k/单声道 → 覆盖回原文件。"""
+    say = progress or (lambda _message: None)
+    ffmpeg = resolve_tool(cfg, "ffmpeg")
+    ffprobe = resolve_tool(cfg, "ffprobe")
+    done = 0
+    failed: list[tuple[str, str]] = []
+    for position, raw_path in enumerate(files, start=1):
+        source = Path(str(raw_path))
+        say("正在处理 %d/%d：%s" % (position, len(files), source.name))
+        temp_path = source.with_name(source.stem + ".fx_tmp.wav")
+        backup_path = source.with_name(source.stem + ".original.wav")
+        try:
+            if not source.is_file():
+                raise FileNotFoundError("音频不存在：%s" % source)
+            if not backup_path.is_file():
+                shutil.copy2(str(source), str(backup_path))
+            apply_effect(str(backup_path if backup_path.is_file() else source), str(temp_path), preset, ffmpeg)
+            info = probe(str(temp_path), ffprobe)
+            if int(info.get("sample_rate") or 0) != 48000 or int(info.get("channels") or 0) != 1:
+                raise ValueError("输出规格不正确：%s" % info)
+            os.replace(str(temp_path), str(source))
+            done += 1
+        except Exception as exc:
+            failed.append((source.name, friendly_error(exc)))
+            try:
+                if temp_path.is_file():
+                    temp_path.unlink()
+            except OSError:
+                pass
+    return {"done": done, "failed": failed}
 
 
 def _read_text_file(path: str) -> str:

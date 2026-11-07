@@ -16,6 +16,8 @@ DEFAULT_CONFIG: dict = {
     "material_root": "",
     "calaplayer_exe": "",
     "calaplayer_builder_exe": "",
+    # CalabiYauVoice 语音工具（顶栏「打开 CalabiYau」用）：exe 或它所在文件夹
+    "calabiyau_exe": "",
     # Adobe Audition（"打开 AU"用）：留空时由 paths.resolve_audition_exe 自动检测
     "audition_exe": "",
     # 台词输出目录：留空时回落 <material_root>/<sound_subdir>

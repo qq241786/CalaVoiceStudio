@@ -26,6 +26,7 @@ def main() -> int:
     ap.add_argument("--text-lang", default="")
     ap.add_argument("--version", default="")
     ap.add_argument("--device", default="")
+    ap.add_argument("--detect", action="store_true", help="额外跑一次外部工具自动检测（不写配置）")
     args = ap.parse_args()
 
     app_dir = Path(args.app_dir).resolve()
@@ -42,6 +43,16 @@ def main() -> int:
     for it in items:
         _line("OK  " if it.ok else "FAIL", f"{it.label}: {it.detail}" + (f" | 建议: {it.hint}" if it.hint and not it.ok else ""))
         failed += 0 if it.ok else 1
+
+    if args.detect:
+        _line("INFO", "外部工具快速检测（缓存/Steam 库/相邻目录，不扫全盘）…")
+        found = paths.detect_all(cfg, progress=lambda m: _line("SCAN", m), full_scan=False)
+        for key in paths.TOOL_KEYS:
+            label = paths.TOOL_LABELS.get(key, key)
+            values = found.get(key) or []
+            _line("INFO", f"{label}: {values[0] if values else '未找到'}" + (f"（共 {len(values)} 个候选）" if len(values) > 1 else ""))
+        prefs = paths.calabiyau_prefs_path()
+        _line("INFO", f"CalabiYau 配置位置: {prefs}")
 
     if not cfg.get("sovits_root"):
         _line("INFO", "sovits_root 为空，尝试自动检测…")

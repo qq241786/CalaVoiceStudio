@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +21,24 @@ CREATE_NO_WINDOW = 0x08000000
 SCAN_MAX_DEPTH = 8
 SCAN_MAX_DIRS = 60000
 SCAN_MAX_ENTRIES = 600000
+
+# 外部工具类路径：一键自动检测/缓存共用。顺序即界面展示顺序。
+TOOL_KEYS = ("calaplayer_exe", "calaplayer_builder_exe", "calabiyau_exe", "audition_exe")
+TOOL_LABELS = {
+    "calaplayer_exe": "游戏 CalaPlayer",
+    "calaplayer_builder_exe": "打包工具",
+    "calabiyau_exe": "CalabiYau 语音工具",
+    "audition_exe": "AU（Audition）",
+}
+
+# CalabiYauVoice 语音工具的主程序名（检测时按它匹配）
+CALABIYAU_EXE_NAME = "CalabiYauVoice_GUI.exe"
+
+# 检测缓存：<app_dir>/data/detect_cache.json
+# 记住上次自动探测到的外部工具路径；下次启动/再次检测先验证缓存，命中即秒回，不必重复全盘扫描。
+DETECT_CACHE_FILE = "detect_cache.json"
+# 同一份缓存里"全盘扫描已完成"的有效期（秒）。过期后允许再扫一次，避免目录搬家后一直用旧结果。
+DETECT_FULL_SCAN_TTL = 6 * 3600
 
 
 @dataclass
@@ -329,6 +350,125 @@ def _skip_scan_dir(parent_depth: int, name: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------- 检测缓存
+# 目标：同一个路径不需要用户每次都点「自动检测」；程序启动时先读缓存，命中即用。
+# 缓存只记录"上次真实探测到"的路径，读取时会再验证一次文件/目录是否还在（搬家/卸载自动失效）。
+
+
+def _detect_cache_path(cfg) -> Path | None:
+    if cfg is None:
+        return None
+    try:
+        return Path(cfg.data_dir) / DETECT_CACHE_FILE
+    except Exception:
+        return None
+
+
+def load_detect_cache(cfg) -> dict:
+    """读取检测缓存；文件缺失/损坏返回 {"paths": {}, "full_scan_at": 0.0}。"""
+    default = {"paths": {}, "full_scan_at": 0.0}
+    path = _detect_cache_path(cfg)
+    if path is None or not path.is_file():
+        return default
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return default
+    if not isinstance(data, dict):
+        return default
+    paths = data.get("paths")
+    if not isinstance(paths, dict):
+        paths = {}
+    cleaned: dict = {}
+    for key, value in paths.items():
+        text = str(value or "").strip()
+        if text:
+            cleaned[str(key)] = text
+    try:
+        scanned_at = float(data.get("full_scan_at") or 0.0)
+    except (TypeError, ValueError):
+        scanned_at = 0.0
+    return {"paths": cleaned, "full_scan_at": scanned_at}
+
+
+def save_detect_cache(cfg, values: dict) -> None:
+    """合并写入检测缓存（values: {key: 路径}）。写失败不影响主流程。"""
+    path = _detect_cache_path(cfg)
+    if path is None:
+        return
+    cache = load_detect_cache(cfg)
+    merged = dict(cache.get("paths") or {})
+    changed = False
+    for key, value in (values or {}).items():
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if merged.get(str(key)) != text:
+            merged[str(key)] = text
+            changed = True
+    if not changed:
+        return
+    payload = {"paths": merged, "full_scan_at": cache.get("full_scan_at") or 0.0}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        return
+
+
+def remember_detected(cfg, key: str, value: str) -> None:
+    """把一次成功探测/用户选择的路径写入缓存（下次启动直接命中）。"""
+    text = str(value or "").strip()
+    if text:
+        save_detect_cache(cfg, {str(key): text})
+
+
+def cached_detection(cfg, key: str) -> str:
+    """返回缓存里仍然存在的路径；不存在/未缓存返回空串。"""
+    value = str((load_detect_cache(cfg).get("paths") or {}).get(key) or "").strip()
+    if not value:
+        return ""
+    target = Path(value)
+    if target.is_file() or target.is_dir():
+        return value
+    return ""
+
+
+def _cache_full_scan_fresh(cfg, ttl: float = DETECT_FULL_SCAN_TTL) -> bool:
+    cache = load_detect_cache(cfg)
+    try:
+        scanned_at = float(cache.get("full_scan_at") or 0.0)
+    except (TypeError, ValueError):
+        scanned_at = 0.0
+    return bool(scanned_at and (time.time() - scanned_at) < ttl)
+
+
+def full_scan_recent(cfg, ttl: float = DETECT_FULL_SCAN_TTL) -> bool:
+    """最近是否已经做过一次全盘扫描（用于避免每次启动都重扫几十万个目录）。"""
+    return _cache_full_scan_fresh(cfg, ttl)
+
+
+def mark_full_scan(cfg) -> None:
+    """记录一次完整磁盘扫描的时间，用于避免每次启动都重扫几十万个目录。"""
+    path = _detect_cache_path(cfg)
+    if path is None:
+        return
+    cache = load_detect_cache(cfg)
+    payload = {"paths": dict(cache.get("paths") or {}), "full_scan_at": time.time()}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        return
+
+
 def classify_calaplayer_exe(file_name: str):
     """按文件名判定 (类别, 优先级)：game/builder，数字越小越优先。不属于候选则返回 (None, None)。"""
     lowered = (file_name or "").lower()
@@ -348,27 +488,250 @@ def classify_calaplayer_exe(file_name: str):
     return None, None
 
 
-def discover_calaplayer(
+def _compact_name(text: str) -> str:
+    return (text or "").lower().replace("_", "").replace("-", "").replace(" ", "")
+
+
+def classify_calabiyau_exe(file_name: str):
+    """按文件名判定是否为 CalabiYauVoice 工具：(kind, 优先级) 或 (None, None)。
+
+    CalabiYauVoice_GUI.exe 排 0；其它名字里带 calabiyau 的 exe 排 1。
+    游戏本体安装包（Calabiyau_Installer_*.exe）不是本工具，直接排除。
+    """
+    lowered = (file_name or "").lower()
+    if not lowered.endswith(".exe"):
+        return None, None
+    stem = _compact_name(lowered[:-4])
+    if "calabiyau" not in stem:
+        return None, None
+    if "installer" in stem or "uninstall" in stem or stem.startswith("unins"):
+        return None, None
+    if stem == _compact_name(CALABIYAU_EXE_NAME[:-4]):
+        return "calabiyau", 0
+    return "calabiyau", 1
+
+
+# ---------------------------------------------------------------- 快速来源（免全盘扫描）
+# 用户抱怨"每次都要点自动检测才能找到这两个程序"。原因之一是每次都全盘 BFS。
+# 这里优先用注册表/Steam 库/已配置路径的相邻目录做浅层探测：毫秒级命中，找不到才退回全盘扫描。
+
+_VDF_PATH_RE = re.compile(r'"path"\s+"([^"]+)"')
+
+
+def _steam_common_roots() -> list[str]:
+    """Steam 各库的 steamapps\\common（注册表 SteamPath + libraryfolders.vdf）。
+
+    本机常见布局：<库盘>\\SteamLibrary\\steamapps\\common\\<游戏>。
+    只读注册表与 vdf，不写任何东西；读不到就返回空列表（不写死任何盘符）。
+    """
+    steam_dirs: list[Path] = []
+    try:
+        import winreg
+    except ImportError:
+        winreg = None
+    if winreg is not None:
+        for hive, sub in (
+            (winreg.HKEY_CURRENT_USER, "Software\\Valve\\Steam"),
+            (winreg.HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\Valve\\Steam"),
+            (winreg.HKEY_LOCAL_MACHINE, "SOFTWARE\\Valve\\Steam"),
+        ):
+            try:
+                with winreg.OpenKey(hive, sub) as key:
+                    for value_name in ("SteamPath", "InstallPath"):
+                        try:
+                            value, _kind = winreg.QueryValueEx(key, value_name)
+                        except OSError:
+                            continue
+                        text = str(value or "").strip().strip('"')
+                        if text and Path(text).is_dir():
+                            steam_dirs.append(Path(text))
+            except OSError:
+                continue
+
+    libraries: list[Path] = list(steam_dirs)
+    for steam in list(steam_dirs):
+        vdf = steam / "steamapps" / "libraryfolders.vdf"
+        if not vdf.is_file():
+            continue
+        try:
+            text = vdf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for match in _VDF_PATH_RE.finditer(text):
+            candidate = Path(match.group(1).replace("\\\\", "\\"))
+            if candidate.is_dir():
+                libraries.append(candidate)
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for library in libraries:
+        common = library / "steamapps" / "common"
+        if not common.is_dir():
+            continue
+        key = str(common).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(str(common))
+    return result
+
+
+def _quick_scan_game_dir(game_dir: Path) -> list[tuple[str, str, int]]:
+    """在一个游戏目录里做浅层探测（只读、深度 <=2），返回 [(kind, exe 路径, 优先级)]。"""
+    hits: list[tuple[str, str, int]] = []
+    root = Path(game_dir)
+    if not root.is_dir():
+        return hits
+
+    def classify_file(candidate: Path, base_priority: int) -> None:
+        name = candidate.name
+        kind, priority = classify_calaplayer_exe(name)
+        if kind is not None:
+            hits.append((kind, str(candidate), base_priority + int(priority or 0)))
+        calabiyau_kind, calabiyau_priority = classify_calabiyau_exe(name)
+        if calabiyau_kind is not None:
+            hits.append((calabiyau_kind, str(candidate), base_priority + int(calabiyau_priority or 0)))
+
+    def add_file(candidate: Path, base_priority: int) -> None:
+        try:
+            if candidate.is_file():
+                classify_file(candidate, base_priority)
+        except OSError:
+            return
+
+    def add_folder_exes(folder: Path, base_priority: int, limit: int = 60) -> None:
+        try:
+            with os.scandir(folder) as iterator:
+                entries = list(iterator)[:limit]
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".exe"):
+                    classify_file(Path(entry.path), base_priority)
+            except OSError:
+                continue
+
+    # 1) 标准布局：<游戏目录>\Windows\CalaPlayer.exe、<游戏目录>\CalabiYauVoice_GUI\...
+    add_file(root / "Windows" / "CalaPlayer.exe", 0)
+    add_file(root / "CalaPlayer.exe", 1)
+    add_file(root / "CalabiYauVoice_GUI" / CALABIYAU_EXE_NAME, 0)
+    add_file(root / CALABIYAU_EXE_NAME, 1)
+
+    # 2) 直接位于游戏目录的 exe
+    add_folder_exes(root, 2)
+
+    # 3) 游戏目录的直接子目录：名字相关才进去看一眼，避免把整个游戏扫一遍
+    try:
+        with os.scandir(root) as iterator:
+            children = [item for item in iterator if item.is_dir(follow_symlinks=False)][:80]
+    except OSError:
+        children = []
+    for entry in children:
+        name = (entry.name or "").lower()
+        folder = Path(entry.path)
+        if "calabiyau" in name:
+            add_file(folder / CALABIYAU_EXE_NAME, 0)
+            add_folder_exes(folder, 1)
+        elif "calaplayer" in name or "builder" in name or "srcm" in name:
+            add_folder_exes(folder, 1)
+    return hits
+
+
+def _fast_tool_candidates(cfg) -> dict:
+    """不扫全盘就能命中的候选：检测缓存 + Steam 库 + 已配置路径的相邻目录。
+
+    返回 {"game"/"builder"/"calabiyau"/"audition": {绝对路径: 优先级}}，越小越优先。
+    """
+    result: dict = {"game": {}, "builder": {}, "calabiyau": {}, "audition": {}}
+
+    def add(kind: str, path, priority: int) -> None:
+        text = str(path or "").strip()
+        if not text:
+            return
+        target = Path(text)
+        try:
+            if not (target.is_file() or target.is_dir()):
+                return
+        except OSError:
+            return
+        absolute = os.path.abspath(str(target))
+        previous = result[kind].get(absolute)
+        if previous is None or priority < previous:
+            result[kind][absolute] = priority
+
+    # 1) 检测缓存（上次真实探测结果，读取时已验证存在）
+    for key, kind in (
+        ("calaplayer_exe", "game"),
+        ("calaplayer_builder_exe", "builder"),
+        ("calabiyau_exe", "calabiyau"),
+        ("audition_exe", "audition"),
+    ):
+        cached = cached_detection(cfg, key)
+        if cached:
+            add(kind, cached, -2)
+
+    # 2) Steam 库（最常见的安装位置，秒级命中）——只补还没命中的类别
+    missing_kinds = {kind for kind in ("game", "builder", "calabiyau") if not result[kind]}
+    if missing_kinds:
+        for common in _steam_common_roots():
+            try:
+                with os.scandir(common) as iterator:
+                    entries = list(iterator)[:400]
+            except OSError:
+                continue
+            for entry in entries:
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                for kind, path, priority in _quick_scan_game_dir(Path(entry.path)):
+                    if kind in missing_kinds:
+                        add(kind, path, priority)
+
+    # 3) 已配置路径的相邻目录（例如 <游戏目录>\Windows\CalaPlayer.exe → <游戏目录>）
+    seeds: list[Path] = []
+    seeded: set[str] = set()
+    for key, kind in (
+        ("calaplayer_exe", "game"),
+        ("calaplayer_builder_exe", "builder"),
+        ("calabiyau_exe", "calabiyau"),
+    ):
+        if result[kind]:
+            continue
+        text = str(_config_value(cfg, key, "") or "").strip() if cfg is not None else ""
+        if not text:
+            continue
+        target = Path(text)
+        for parent in (target.parent, target.parent.parent):
+            try:
+                if not parent.is_dir():
+                    continue
+            except OSError:
+                continue
+            marker = str(parent).lower()
+            if marker in seeded:
+                continue
+            seeded.add(marker)
+            seeds.append(parent)
+    for seed in seeds:
+        if "calabiyau" in seed.name.lower():
+            add("calabiyau", seed, -1)
+        for kind, path, priority in _quick_scan_game_dir(seed):
+            add(kind, path, priority)
+    return result
+
+
+def _scan_machine_tools(
     cfg,
     progress=None,
-    max_depth: int = DEFAULT_CALAPLAYER_DEPTH,
-    max_dirs: int = DEFAULT_CALAPLAYER_DIRS,
-    max_entries: int = DEFAULT_CALAPLAYER_ENTRIES,
+    max_depth: int = SCAN_MAX_DEPTH,
+    max_dirs: int = SCAN_MAX_DIRS,
+    max_entries: int = SCAN_MAX_ENTRIES,
 ) -> dict:
-    """扫描本机定位 CalaPlayer 游戏程序与打包工具，返回 {"game": [...], "builder": [...]}。
-
-    不依赖任何写死路径：搜索根来自 discovery_roots(cfg)；已配置且存在的排在第一位。
-    progress 回调抛异常视为用户取消，立刻返回空结果。
-    """
-    configured = {
-        "game": str(_config_value(cfg, "calaplayer_exe", "") or "").strip(),
-        "builder": str(_config_value(cfg, "calaplayer_builder_exe", "") or "").strip(),
-    }
-    found: dict = {"game": {}, "builder": {}}
-    for kind, path in configured.items():
-        if path and Path(path).is_file():
-            found[kind][os.path.abspath(path)] = -1
-
+    """对 discovery_roots 做一次全盘 BFS，一次扫描同时找 CalaPlayer 游戏/打包工具/CalabiYau。"""
+    found: dict = {"game": {}, "builder": {}, "calabiyau": {}}
     scanned_dirs = 0
     scanned_entries = 0
     budget_hit = False
@@ -382,6 +745,12 @@ def discover_calaplayer(
         except Exception:
             return False
         return True
+
+    def add(kind: str, path: str, priority: int) -> None:
+        absolute = os.path.abspath(path)
+        previous = found[kind].get(absolute)
+        if previous is None or priority < previous:
+            found[kind][absolute] = priority
 
     for root in discovery_roots(cfg):
         if budget_hit:
@@ -397,17 +766,19 @@ def discover_calaplayer(
                 break
             if scanned_dirs % 200 == 0:
                 if not report(
-                    "正在扫描第 %d 个目录（已找到 游戏 %d 个 / 打包工具 %d 个）：%s"
+                    "正在扫描第 %d 个目录（游戏 %d / 打包工具 %d / CalabiYau %d）：%s"
                     % (
                         scanned_dirs,
                         len(found["game"]),
                         len(found["builder"]),
+                        len(found["calabiyau"]),
                         current,
                     )
                 ):
-                    return {"game": [], "builder": []}
+                    return {"game": {}, "builder": {}, "calabiyau": {}}
             try:
-                entries = list(os.scandir(current))
+                with os.scandir(current) as iterator:
+                    entries = list(iterator)
             except OSError:
                 continue
             scanned_entries += len(entries)
@@ -422,28 +793,263 @@ def discover_calaplayer(
                         queue.append((entry.path, depth + 1))
                     continue
                 kind, priority = classify_calaplayer_exe(name)
-                if kind is None:
-                    continue
-                path = os.path.abspath(entry.path)
-                previous = found[kind].get(path)
-                if previous is None or priority < previous:
-                    found[kind][path] = priority
-
-    result = {"game": [], "builder": []}
-    for kind in ("game", "builder"):
-        ordered = sorted(found[kind].items(), key=lambda item: (item[1], item[0].lower()))
-        result[kind] = [path for path, _priority in ordered]
+                if kind is not None:
+                    add(kind, entry.path, 10 + int(priority or 0))
+                calabiyau_kind, calabiyau_priority = classify_calabiyau_exe(name)
+                if calabiyau_kind is not None:
+                    add(calabiyau_kind, entry.path, 10 + int(calabiyau_priority or 0))
     report(
-        "查找完成：扫描 %d 个目录 / %d 个条目，游戏 %d 个、打包工具 %d 个%s"
+        "查找完成：扫描 %d 个目录 / %d 个条目，游戏 %d 个、打包工具 %d 个、CalabiYau %d 个%s"
         % (
             scanned_dirs,
             scanned_entries,
-            len(result["game"]),
-            len(result["builder"]),
+            len(found["game"]),
+            len(found["builder"]),
+            len(found["calabiyau"]),
             "（已到扫描预算上限）" if budget_hit else "",
         )
     )
-    return result
+    return found
+
+
+def _ordered(found: dict) -> list[str]:
+    return [path for path, _priority in sorted(found.items(), key=lambda item: (item[1], item[0].lower()))]
+
+
+def discover_calaplayer(
+    cfg,
+    progress=None,
+    max_depth: int = DEFAULT_CALAPLAYER_DEPTH,
+    max_dirs: int = DEFAULT_CALAPLAYER_DIRS,
+    max_entries: int = DEFAULT_CALAPLAYER_ENTRIES,
+) -> dict:
+    """扫描本机定位 CalaPlayer 游戏程序与打包工具，返回 {"game": [...], "builder": [...]}。
+
+    顺序：已配置（用户手选）→ 检测缓存 → Steam 库/相邻目录（毫秒级）→ 全盘扫描。
+    不依赖任何写死路径；progress 回调抛异常视为用户取消，立刻返回空结果。
+    """
+    found: dict = {"game": {}, "builder": {}}
+
+    def add(kind: str, path: str, priority: int) -> None:
+        absolute = os.path.abspath(str(path))
+        previous = found[kind].get(absolute)
+        if previous is None or priority < previous:
+            found[kind][absolute] = priority
+
+    for kind, key in (("game", "calaplayer_exe"), ("builder", "calaplayer_builder_exe")):
+        text = str(_config_value(cfg, key, "") or "").strip()
+        if text and Path(text).is_file():
+            add(kind, text, -3)
+
+    fast = _fast_tool_candidates(cfg)
+    for kind in ("game", "builder"):
+        for path, priority in (fast.get(kind) or {}).items():
+            add(kind, path, priority)
+
+    scanned = _scan_machine_tools(
+        cfg, progress=progress, max_depth=max_depth, max_dirs=max_dirs, max_entries=max_entries
+    )
+    for kind in ("game", "builder"):
+        for path, priority in (scanned.get(kind) or {}).items():
+            add(kind, path, priority)
+
+    return {kind: _ordered(found[kind]) for kind in ("game", "builder")}
+
+
+def discover_calabiyau(
+    cfg,
+    progress=None,
+    max_depth: int = DEFAULT_CALAPLAYER_DEPTH,
+    max_dirs: int = DEFAULT_CALAPLAYER_DIRS,
+    max_entries: int = DEFAULT_CALAPLAYER_ENTRIES,
+) -> list[str]:
+    """定位 CalabiYauVoice 语音工具（CalabiYauVoice_GUI.exe）；先缓存/Steam 库，再全盘扫描。"""
+    found: dict = {}
+
+    def add(path, priority: int) -> None:
+        text = str(path or "").strip()
+        if not text:
+            return
+        absolute = os.path.abspath(text)
+        previous = found.get(absolute)
+        if previous is None or priority < previous:
+            found[absolute] = priority
+
+    configured = str(_config_value(cfg, "calabiyau_exe", "") or "").strip()
+    if configured:
+        target = Path(configured)
+        if target.is_dir():
+            exe = target / CALABIYAU_EXE_NAME
+            add(exe if exe.is_file() else target, -3)
+        elif target.is_file():
+            add(target, -3)
+
+    fast = _fast_tool_candidates(cfg)
+    for path, priority in (fast.get("calabiyau") or {}).items():
+        add(path, priority)
+
+    scanned = _scan_machine_tools(
+        cfg, progress=progress, max_depth=max_depth, max_dirs=max_dirs, max_entries=max_entries
+    )
+    for path, priority in (scanned.get("calabiyau") or {}).items():
+        add(path, priority)
+    return _ordered(found)
+
+
+def resolve_calabiyau_target(cfg) -> str:
+    """返回 CalabiYauVoice 工具的可启动目标（exe 或文件夹）；只走快速来源，不扫全盘。
+
+    找不到返回空串。文件夹也算合法目标（打开所在文件夹）。
+    """
+    configured = str(_config_value(cfg, "calabiyau_exe", "") or "").strip()
+    target = Path(configured) if configured else None
+    if target is not None:
+        try:
+            if target.is_file():
+                return str(target)
+            if target.is_dir():
+                exe = target / CALABIYAU_EXE_NAME
+                return str(exe) if exe.is_file() else str(target)
+        except OSError:
+            pass
+    cached = cached_detection(cfg, "calabiyau_exe")
+    if cached:
+        return cached
+    fast = _fast_tool_candidates(cfg)
+    ordered = _ordered(fast.get("calabiyau") or {})
+    if not ordered:
+        return ""
+    value = Path(ordered[0])
+    try:
+        if value.is_dir():
+            exe = value / CALABIYAU_EXE_NAME
+            return str(exe) if exe.is_file() else str(value)
+    except OSError:
+        pass
+    return ordered[0]
+
+
+def calabiyau_prefs_path() -> Path:
+    """CalabiYauVoice_GUI 的唯一持久配置：%APPDATA%\\CalabiYauVoice\\prefs.json。"""
+    appdata = str(os.environ.get("APPDATA") or "").strip()
+    if not appdata:
+        appdata = str(Path.home() / "AppData" / "Roaming")
+    return Path(appdata) / "CalabiYauVoice" / "prefs.json"
+
+
+def ensure_calabiyau_prefs(cfg, output_dir: str = "") -> dict:
+    """把 CalabiYauVoice_GUI 的默认保存/转换目录指向本软件的语音输出目录（"链接"两个工具）。
+
+    只补 prefs.json 里缺失/为空的键，绝不覆盖用户已设置的值；文件存在但无法解析时保持原样。
+    返回 {"path":..., "changed": [...], "skipped": 说明, "saved": bool}。
+    """
+    prefs = calabiyau_prefs_path()
+    target = str(output_dir or "").strip() or resolve_output_dir(cfg)
+    if not target:
+        return {"path": str(prefs), "changed": [], "skipped": "未设置输出目录，跳过", "saved": False}
+    output = os.path.abspath(target)
+
+    data: dict = {}
+    if prefs.is_file():
+        try:
+            loaded = json.loads(prefs.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise ValueError("prefs.json 不是对象")
+            data = loaded
+        except (OSError, ValueError):
+            return {
+                "path": str(prefs),
+                "changed": [],
+                "skipped": "prefs.json 无法解析，保持原样",
+                "saved": False,
+            }
+
+    changed: list[str] = []
+    for key in ("savePath", "converterSavePath", "assetToolsOutputPath"):
+        current = data.get(key)
+        if isinstance(current, str) and current.strip():
+            continue
+        data[key] = output
+        changed.append(key)
+    if not changed:
+        return {"path": str(prefs), "changed": [], "skipped": "已存在，未改动", "saved": True}
+    try:
+        prefs.parent.mkdir(parents=True, exist_ok=True)
+        tmp = prefs.with_name(prefs.name + ".tmp")
+        with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp, prefs)
+    except OSError as exc:
+        return {"path": str(prefs), "changed": [], "skipped": "写入失败：%s" % exc, "saved": False}
+    return {"path": str(prefs), "changed": changed, "skipped": "", "saved": True}
+
+
+def detect_all(cfg, progress=None, full_scan: bool = True) -> dict:
+    """一次性探测全部外部工具，返回 {key: [候选路径...]}（key 见 TOOL_KEYS）。
+
+    顺序：已配置 → 检测缓存 → Steam 库/相邻目录（毫秒级）→ 全盘扫描（full_scan=True 时）。
+    这是"不用逐项手动检测"的入口：一次调用就能补齐多个路径框。
+    """
+    priorities: dict = {key: {} for key in TOOL_KEYS}
+    scanned_now = False
+
+    def add(key: str, path, priority: int) -> None:
+        text = str(path or "").strip()
+        if not text:
+            return
+        absolute = os.path.abspath(text)
+        previous = priorities[key].get(absolute)
+        if previous is None or priority < previous:
+            priorities[key][absolute] = priority
+
+    def valid(key: str, path: str) -> bool:
+        target = Path(path)
+        try:
+            if key in ("calaplayer_exe", "calaplayer_builder_exe"):
+                return target.is_file()
+            return target.is_file() or target.is_dir()
+        except OSError:
+            return False
+
+    for key in TOOL_KEYS:
+        configured = str(_config_value(cfg, key, "") or "").strip()
+        if configured and valid(key, configured):
+            add(key, configured, -3)
+        cached = cached_detection(cfg, key)
+        if cached:
+            add(key, cached, -2)
+
+    fast = _fast_tool_candidates(cfg)
+    kind_by_key = {
+        "calaplayer_exe": "game",
+        "calaplayer_builder_exe": "builder",
+        "calabiyau_exe": "calabiyau",
+        "audition_exe": "audition",
+    }
+    for key in TOOL_KEYS:
+        for path, priority in (fast.get(kind_by_key[key]) or {}).items():
+            add(key, path, priority)
+
+    tools_missing = any(not priorities[key] for key in ("calaplayer_exe", "calaplayer_builder_exe", "calabiyau_exe"))
+    if full_scan and tools_missing:
+        scanned_now = True
+        _notify(progress, "正在扫描本机定位外部工具（首次约 5~10 秒，之后会走缓存）")
+        scanned = _scan_machine_tools(cfg, progress=progress)
+        for path, priority in (scanned.get("game") or {}).items():
+            add("calaplayer_exe", path, priority)
+        for path, priority in (scanned.get("builder") or {}).items():
+            add("calaplayer_builder_exe", path, priority)
+        for path, priority in (scanned.get("calabiyau") or {}).items():
+            add("calabiyau_exe", path, priority)
+
+    if not priorities["audition_exe"]:
+        _notify(progress, "正在检测 Adobe Audition")
+        for path in discover_audition(cfg, progress=None):
+            add("audition_exe", path, 0)
+
+    if scanned_now:
+        mark_full_scan(cfg)
+    return {key: _ordered(priorities[key]) for key in TOOL_KEYS}
 
 
 # ---------------------------------------------------------------- 外部工具与输出目录
@@ -497,11 +1103,15 @@ def _start_menu_audition() -> list[str]:
 
 
 def discover_audition(cfg=None, progress=None) -> list[str]:
-    """找 Adobe Audition（"打开 AU"）：已配置优先，其次注册表 App Paths，其次默认安装目录，最后开始菜单。"""
+    """找 Adobe Audition（"打开 AU"）：已配置优先，其次检测缓存，然后注册表 App Paths、默认安装目录、开始菜单。"""
     found: list[str] = []
     configured = str(_config_value(cfg, "audition_exe", "") or "").strip() if cfg is not None else ""
     if configured and Path(configured).is_file():
         found.append(configured)
+    if cfg is not None:
+        cached = cached_detection(cfg, "audition_exe")
+        if cached:
+            found.append(cached)
 
     _notify(progress, "正在检测 Adobe Audition")
     for name in ("Adobe Audition.exe", "Audition.exe"):
@@ -545,8 +1155,24 @@ def resolve_audition_exe(cfg=None) -> str:
     configured = str(_config_value(cfg, "audition_exe", "") or "").strip() if cfg is not None else ""
     if configured and Path(configured).is_file():
         return configured
+    if cfg is not None:
+        cached = cached_detection(cfg, "audition_exe")
+        if cached:
+            return cached
     found = discover_audition(cfg)
     return found[0] if found else ""
+
+
+def resolve_audition_cached(cfg=None) -> str:
+    """只查配置与检测缓存（毫秒级，不触发扫描），供界面刷新按钮状态用。"""
+    configured = str(_config_value(cfg, "audition_exe", "") or "").strip() if cfg is not None else ""
+    if configured and Path(configured).is_file():
+        return configured
+    if cfg is not None:
+        cached = cached_detection(cfg, "audition_exe")
+        if cached:
+            return cached
+    return ""
 
 
 def resolve_output_dir(cfg) -> str:
@@ -852,6 +1478,47 @@ def check_environment(cfg, progress=None) -> list[CheckItem]:
             builder_ok,
             builder_detail,
             "" if builder_ok else "在『设置』页选择 CalaPlayerSrcmBuilderGUI.exe，或点『自动检测』",
+        )
+    )
+
+    _notify(progress, "正在检查 CalabiYauVoice 语音工具")
+    calabiyau = ""
+    try:
+        calabiyau = str(resolve_calabiyau_target(cfg) or "").strip()
+    except Exception:
+        calabiyau = ""
+    calabiyau_ok = bool(calabiyau) and Path(calabiyau).exists()
+    if not calabiyau:
+        calabiyau_detail = "未设置（可选：只影响顶栏「打开 CalabiYau」按钮）"
+    elif not calabiyau_ok:
+        calabiyau_detail = "路径不存在：%s" % calabiyau
+    else:
+        calabiyau_detail = calabiyau
+    items.append(
+        CheckItem(
+            "calabiyau_exe",
+            "CalabiYauVoice 语音工具",
+            calabiyau_ok,
+            calabiyau_detail,
+            ""
+            if calabiyau_ok
+            else "在『设置』页选择 CalabiYauVoice_GUI.exe（或它所在的文件夹），或点『自动检测』",
+        )
+    )
+
+    _notify(progress, "正在检查 Adobe Audition")
+    audition = ""
+    try:
+        audition = str(resolve_audition_exe(cfg) or "").strip()
+    except Exception:
+        audition = ""
+    items.append(
+        CheckItem(
+            "audition_exe",
+            "AU 程序（Audition）",
+            bool(audition),
+            audition or "未找到（可手选；只影响「放入 AU」相关按钮）",
+            "" if audition else "在『设置』页选择 Adobe Audition.exe，或点『自动检测』",
         )
     )
 

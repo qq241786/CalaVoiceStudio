@@ -306,7 +306,7 @@ class PreviewWorker(QThread):
 
 
 class CheckWorker(QThread):
-    """环境检测 + 自动探测 GPT-SoVITS / 素材根目录。"""
+    """环境检测 + 自动探测 GPT-SoVITS / 素材根目录 / 全部外部工具路径。"""
 
     progress = Signal(str)
     done = Signal(object)
@@ -321,33 +321,112 @@ class CheckWorker(QThread):
         roots = [str(r) for r in roots if str(r).strip()]
         return roots
 
+    def _configured_ok(self, key: str) -> bool:
+        """当前配置的路径是否仍然有效（文件/目录还在）。"""
+        value = str(self.cfg.get(key) or "").strip()
+        if not value:
+            return False
+        target = Path(value)
+        try:
+            if key in ("calaplayer_exe", "calaplayer_builder_exe"):
+                return target.is_file()
+            return target.is_file() or target.is_dir()
+        except OSError:
+            return False
+
+    def _detect_tools(self, result: dict) -> None:
+        """一次性探测全部外部工具路径：空的自动填好并落盘，用户不用逐项点『自动检测』。
+
+        先走缓存/Steam 库等快速来源（毫秒级）；只有存在缺失且最近没全盘扫过时才真正扫盘，
+        避免每次启动都花 5~10 秒。
+        """
+        tool_keys = list(getattr(paths, "TOOL_KEYS", ()) or ())
+        if not tool_keys:
+            return
+        missing = [key for key in tool_keys if not self._configured_ok(key)]
+        if not missing:
+            return
+
+        full_scan = any(key != "audition_exe" for key in missing)
+        if full_scan and paths.full_scan_recent(self.cfg):
+            full_scan = False
+            self.progress.emit("检测缓存仍在有效期内：先按缓存/Steam 库快速定位，不重复全盘扫描。")
+        detected = paths.detect_all(self.cfg, progress=self.progress.emit, full_scan=full_scan)
+        result["detected"] = detected
+
+        applied: dict = {}
+        for key in missing:
+            values = list(detected.get(key) or [])
+            if not values:
+                continue
+            chosen = str(values[0])
+            paths.remember_detected(self.cfg, key, chosen)
+            self.cfg.set(key, chosen)
+            applied[key] = chosen
+            label = str((getattr(paths, "TOOL_LABELS", {}) or {}).get(key) or key)
+            self.progress.emit("已自动填入%s：%s" % (label, chosen))
+            for position, value in enumerate(values[1:5], start=2):
+                self.progress.emit("  候选%d：%s" % (position, value))
+        if applied:
+            result.setdefault("applied", {}).update(applied)
+
+        still_missing = [key for key in missing if key not in applied]
+        if still_missing and not full_scan:
+            names = "、".join(
+                str((getattr(paths, "TOOL_LABELS", {}) or {}).get(key) or key) for key in still_missing
+            )
+            self.progress.emit("未找到：%s（已用快速定位；如需全盘重扫，请点『自动检测』）" % names)
+
+    def _sovits_ok(self) -> bool:
+        """GPT-SoVITS 目录是否仍然有效（含 api_v2.py 与内置 python）。"""
+        value = str(self.cfg.get("sovits_root") or "").strip()
+        if not value:
+            return False
+        root = Path(value)
+        try:
+            if not root.is_dir() or not (root / "api_v2.py").is_file():
+                return False
+            return (root / "runtime" / "python.exe").is_file() or (root / "runtime" / "bin" / "python").is_file()
+        except OSError:
+            return False
+
     def run(self) -> None:
         result = {"items": [], "sovits_roots": [], "material_roots": [], "applied": {}}
         try:
             if self.autodetect:
                 roots = self._search_roots()
-                self.progress.emit("正在自动探测 GPT-SoVITS 目录…")
-                found = paths.find_sovits_roots(roots, progress=self.progress.emit)
-                result["sovits_roots"] = list(found or [])
-                current = str(self.cfg.get("sovits_root") or "").strip()
-                chosen = ""
-                if current and current in result["sovits_roots"]:
-                    chosen = current
-                elif result["sovits_roots"]:
-                    chosen = result["sovits_roots"][0]
-                if chosen and not current:
-                    self.cfg.set("sovits_root", chosen)
-                    result["applied"]["sovits_root"] = chosen
-                    self.progress.emit("已自动填入 GPT-SoVITS 目录：%s" % chosen)
+                # 只对"缺失/失效"的项做扫描：已经配好的不再重复扫盘（启动更快）
+                if not self._sovits_ok():
+                    self.progress.emit("正在自动探测 GPT-SoVITS 目录…")
+                    found = paths.find_sovits_roots(roots, progress=self.progress.emit)
+                    result["sovits_roots"] = list(found or [])
+                    current = str(self.cfg.get("sovits_root") or "").strip()
+                    chosen = ""
+                    if current and current in result["sovits_roots"]:
+                        chosen = current
+                    elif result["sovits_roots"]:
+                        chosen = result["sovits_roots"][0]
+                    if chosen and not current:
+                        self.cfg.set("sovits_root", chosen)
+                        result["applied"]["sovits_root"] = chosen
+                        self.progress.emit("已自动填入 GPT-SoVITS 目录：%s" % chosen)
+                else:
+                    result["sovits_roots"] = [str(self.cfg.get("sovits_root") or "").strip()]
 
-                self.progress.emit("正在自动探测素材目录…")
-                materials = paths.find_material_roots(roots, progress=self.progress.emit)
-                result["material_roots"] = list(materials or [])
-                current_material = str(self.cfg.get("material_root") or "").strip()
-                if materials and not current_material:
-                    self.cfg.set("material_root", materials[0])
-                    result["applied"]["material_root"] = materials[0]
-                    self.progress.emit("已自动填入素材目录：%s" % materials[0])
+                if not self._configured_ok("material_root"):
+                    self.progress.emit("正在自动探测素材目录…")
+                    materials = paths.find_material_roots(roots, progress=self.progress.emit)
+                    result["material_roots"] = list(materials or [])
+                    current_material = str(self.cfg.get("material_root") or "").strip()
+                    if materials and not current_material:
+                        self.cfg.set("material_root", materials[0])
+                        result["applied"]["material_root"] = materials[0]
+                        self.progress.emit("已自动填入素材目录：%s" % materials[0])
+                else:
+                    result["material_roots"] = [str(self.cfg.get("material_root") or "").strip()]
+
+                self.progress.emit("正在自动探测外部工具路径…")
+                self._detect_tools(result)
 
             self.progress.emit("正在检查运行环境…")
             result["items"] = list(paths.check_environment(self.cfg, progress=self.progress.emit) or [])

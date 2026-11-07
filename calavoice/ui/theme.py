@@ -275,6 +275,24 @@ def _computer(painter: QPainter, accent: str, color: str) -> None:
     painter.drawLine(QPointF(4.4, 6.0), QPointF(8.0, 6.0))
 
 
+def _link(painter: QPainter, accent: str, color: str) -> None:
+    """链环：表示"把外部工具接入/链接进来"。"""
+    _pen(painter, color, 1.5)
+    painter.drawArc(QRectF(1.8, 5.2, 7.0, 6.6), 90 * 16, 180 * 16)
+    painter.drawArc(QRectF(7.2, 5.2, 7.0, 6.6), -90 * 16, 180 * 16)
+    _pen(painter, accent, 1.5)
+    painter.drawLine(QPointF(5.8, 8.5), QPointF(10.2, 8.5))
+
+
+def _sliders(painter: QPainter, accent: str, color: str) -> None:
+    """三根推子：表示"快速效果 / 参数调节"。"""
+    _pen(painter, color, 1.2)
+    for y in (4.2, 8.0, 11.8):
+        painter.drawLine(QPointF(2.4, y), QPointF(13.6, y))
+    _pen(painter, accent, 1.4)
+    for x, y in ((9.6, 4.2), (5.6, 8.0), (11.0, 11.8)):
+        painter.drawEllipse(QRectF(x - 1.5, y - 1.5, 3.0, 3.0))
+
 
 _ICON_DRAWERS = {
     "folder": _folder,
@@ -291,6 +309,8 @@ _ICON_DRAWERS = {
     "volume": _volume,
     "checklist": _checklist,
     "computer": _computer,
+    "link": _link,
+    "sliders": _sliders,
 }
 
 

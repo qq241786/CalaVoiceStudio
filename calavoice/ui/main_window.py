@@ -42,6 +42,7 @@ PRESTART_MIN_VRAM_MB = 1900
 CALA_TARGETS = (
     ("calaplayer_exe", "游戏 CalaPlayer", "btn_cala_game", "▶ 打开游戏 CalaPlayer"),
     ("calaplayer_builder_exe", "打包工具", "btn_cala_builder", "🛠 打开打包工具"),
+    ("calabiyau_exe", "CalabiYau 语音工具", "btn_calabiyau", "打开 CalabiYau"),
 )
 
 
@@ -131,11 +132,13 @@ class MainWindow(QMainWindow):
         bar.addWidget(title)
         bar.addSeparator()
 
-        # 两个 CalaPlayer 开关放在第一行（各自独立、各自独立配置路径）
+        # 三个外部工具开关放在第一行（各自独立、各自独立配置路径）
         self.btn_cala_game = make_button("打开游戏 CalaPlayer", icon_name="play")
         self.btn_cala_builder = make_button("打开打包工具", icon_name="computer")
+        self.btn_calabiyau = make_button("打开 CalabiYau", icon_name="link")
         bar.addWidget(self.btn_cala_game)
         bar.addWidget(self.btn_cala_builder)
+        bar.addWidget(self.btn_calabiyau)
 
         spacer = QWidget(self)
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -192,6 +195,7 @@ class MainWindow(QMainWindow):
         self.btn_cala_builder.clicked.connect(
             lambda: self.launch_calaplayer("calaplayer_builder_exe", "打包工具")
         )
+        self.btn_calabiyau.clicked.connect(lambda: self.launch_calaplayer("calabiyau_exe", "CalabiYau 语音工具"))
 
     def _build_tabs(self) -> None:
         self.tabs = QTabWidget(self)
@@ -276,8 +280,11 @@ class MainWindow(QMainWindow):
         applied = data.get("applied") or {}
         if applied:
             self.settings_page.reload()
+            self._refresh_calaplayer_buttons()
+            labels = getattr(paths, "TOOL_LABELS", {}) or {}
             for key, value in applied.items():
-                self.append_log("已自动填入 %s：%s" % (key, value))
+                label = str(labels.get(key) or key)
+                self.append_log("已自动填入%s：%s" % (label, value))
         items = list(data.get("items") or [])
         self._env_items = items
         self.settings_page.show_check_items(items)
@@ -426,10 +433,16 @@ class MainWindow(QMainWindow):
             button = getattr(self, attr, None)
             if button is None:
                 continue
-            exe = self._calaplayer_path(key)
-            ready = bool(exe) and os.path.isfile(exe)
+            target = self._calaplayer_path(key)
+            if key == "calabiyau_exe" and not target:
+                # 只查检测缓存（毫秒级）；真正的扫描在自动检测里做，避免启动时卡界面
+                try:
+                    target = str(paths.cached_detection(self.cfg, "calabiyau_exe") or "")
+                except Exception:
+                    target = ""
+            ready = bool(target) and os.path.exists(target)
             button.setEnabled(ready)
-            button.setToolTip("启动%s：%s" % (label, exe) if ready else NOT_CONFIGURED_HINT)
+            button.setToolTip("启动%s：%s" % (label, target) if ready else NOT_CONFIGURED_HINT)
         self._refresh_tool_buttons()
 
     def _refresh_tool_buttons(self) -> None:
@@ -448,7 +461,11 @@ class MainWindow(QMainWindow):
 
         audition = ""
         try:
-            audition = str(getattr(paths, "resolve_audition_exe", lambda _cfg: "")(self.cfg) or "")
+            resolve_cached = getattr(paths, "resolve_audition_cached", None)
+            if callable(resolve_cached):
+                audition = str(resolve_cached(self.cfg) or "")
+            else:
+                audition = str(getattr(paths, "resolve_audition_exe", lambda _cfg: "")(self.cfg) or "")
         except Exception:
             audition = ""
         if audition:
@@ -493,20 +510,38 @@ class MainWindow(QMainWindow):
         self.append_log("已启动 Adobe Audition（进程 %s）：%s" % (pid, exe))
 
     def launch_calaplayer(self, key: str, label: str) -> None:
-        exe = self._calaplayer_path(key)
-        if not exe:
+        target = self._calaplayer_path(key)
+        if key == "calabiyau_exe" and not target:
+            try:
+                target = str(paths.resolve_calabiyau_target(self.cfg) or "")
+            except Exception:
+                target = ""
+        if not target:
             QMessageBox.warning(self, "未配置", "%s 还没有配置，请到「设置」页选择或点「自动检测」。" % label)
             return
-        if not os.path.isfile(exe):
-            QMessageBox.warning(self, "文件不存在", "找不到%s：\n%s" % (label, exe))
+        if not os.path.exists(target):
+            QMessageBox.warning(self, "文件不存在", "找不到%s：\n%s" % (label, target))
             self._refresh_calaplayer_buttons()
             return
+        if key == "calabiyau_exe":
+            # 顺手把它默认的保存/转换目录补到本软件的语音输出目录（只补空缺，不覆盖用户设置）
+            try:
+                link = paths.ensure_calabiyau_prefs(self.cfg)
+            except Exception as exc:
+                link = {"skipped": "预处理失败：%s" % friendly_error(exc)}
+            if link.get("changed"):
+                self.append_log(
+                    "已把 CalabiYau 的默认目录指向语音输出目录（%s）：%s"
+                    % (", ".join(link["changed"]), link.get("path"))
+                )
+            elif link.get("skipped"):
+                self.append_log("CalabiYau 配置未改动：%s" % link["skipped"])
         try:
-            pid = launcher.launch_exe(exe)
+            pid = launcher.launch_target(target)
         except Exception as exc:
             QMessageBox.warning(self, "启动失败", friendly_error(exc))
             return
-        self.append_log("已启动%s（进程 %s）：%s" % (label, pid, exe))
+        self.append_log("已启动%s（进程 %s）：%s" % (label, pid, target))
 
     def open_material_dir(self) -> None:
         try:
@@ -548,11 +583,17 @@ class MainWindow(QMainWindow):
     def _startup_check(self) -> None:
         """启动自检：只做存在性检查（毫秒级）。
 
-        仅当关键路径尚未配置（换电脑 / 换位置 / 首启）时才全盘自动探测，
-        避免每次启动都扫一遍几十万个目录。
+        仅当关键路径尚未配置/失效（换电脑 / 换位置 / 首启）时才自动探测，
+        避免每次启动都扫一遍几十万个目录；外部工具路径靠检测缓存做到"第二次秒开"。
         """
         unconfigured = not (self.cfg.get("sovits_root") and self.cfg.get("material_root"))
-        self.run_check(bool(unconfigured))
+        tool_missing = False
+        for key in getattr(paths, "TOOL_KEYS", ()) or ():
+            value = str(self.cfg.get(key) or "").strip()
+            if not value or not os.path.exists(value):
+                tool_missing = True
+                break
+        self.run_check(bool(unconfigured or tool_missing))
         QTimer.singleShot(800, self._maybe_prestart_backend)
 
     # ---------- 后端预启动（把 30 秒冷启动藏到用户写台词的时间里） ----------
@@ -652,6 +693,7 @@ class MainWindow(QMainWindow):
             self._backend_worker,
             self.script_page.worker,
             self.script_page.preview,
+            self.script_page.fx_worker,
             self.profiles_page.preview,
             self.profiles_page._discover_worker,
         ]

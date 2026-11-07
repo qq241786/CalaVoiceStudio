@@ -95,6 +95,18 @@ class SettingsPage(QWidget):
             "打包工具（SrcmBuilderGUI.exe）", _with_button(self.builder_row, self.btn_detect_builder, path_box)
         )
 
+        self.calabiyau_row = PathRow(
+            "file",
+            file_filter="可执行文件 (*.exe);;所有文件 (*.*)",
+            placeholder="CalabiYauVoice_GUI.exe（或其所在文件夹；顶栏「打开 CalabiYau」用）",
+            parent=path_box,
+        )
+        self.btn_detect_calabiyau = make_button("自动检测", icon_name="refresh")
+        path_form.addRow(
+            "CalabiYau 语音工具",
+            _with_button(self.calabiyau_row, self.btn_detect_calabiyau, path_box),
+        )
+
         self.audition_row = PathRow(
             "file",
             file_filter="可执行文件 (*.exe);;所有文件 (*.*)",
@@ -166,9 +178,15 @@ class SettingsPage(QWidget):
         )
         self.btn_open_sovits = make_button("打开 GPT-SoVITS 目录", icon_name="folder")
         self.btn_open_calaplayer = make_button("打开 CalaPlayer 所在目录", icon_name="computer")
+        self.btn_detect_tools = make_button(
+            "一键检测外部工具",
+            icon_name="checklist",
+            tooltip="一次把 游戏 CalaPlayer / 打包工具 / CalabiYau / AU 全部自动找出来并保存，不用逐项点自动检测",
+        )
         buttons.addWidget(self.btn_save)
         buttons.addWidget(self.btn_make_root)
         buttons.addWidget(self.btn_make_tree)
+        buttons.addWidget(self.btn_detect_tools)
         buttons.addWidget(self.btn_open_sovits)
         buttons.addWidget(self.btn_open_calaplayer)
         buttons.addStretch(1)
@@ -211,8 +229,10 @@ class SettingsPage(QWidget):
         self.btn_detect_material.clicked.connect(self.detect_material)
         self.btn_detect_game.clicked.connect(self.detect_game)
         self.btn_detect_builder.clicked.connect(self.detect_builder)
+        self.btn_detect_calabiyau.clicked.connect(self.detect_calabiyau)
         self.btn_detect_audition.clicked.connect(self.detect_audition)
         self.btn_detect_output.clicked.connect(self.detect_output_dir)
+        self.btn_detect_tools.clicked.connect(self.detect_all_tools)
         self.btn_check.clicked.connect(lambda: self.check_requested.emit(False))
         self.btn_auto_check.clicked.connect(lambda: self.check_requested.emit(True))
 
@@ -223,6 +243,7 @@ class SettingsPage(QWidget):
         self.material_row.set_text(str(self.cfg.get("material_root") or ""))
         self.calaplayer_row.set_text(str(self.cfg.get("calaplayer_exe") or ""))
         self.builder_row.set_text(str(self.cfg.get("calaplayer_builder_exe") or ""))
+        self.calabiyau_row.set_text(str(self.cfg.get("calabiyau_exe") or ""))
         self.audition_row.set_text(str(self.cfg.get("audition_exe") or ""))
         self.output_row.set_text(str(self.cfg.get("output_dir") or ""))
         try:
@@ -247,6 +268,7 @@ class SettingsPage(QWidget):
             self.cfg.set("material_root", self.material_row.text())
             self.cfg.set("calaplayer_exe", self.calaplayer_row.text())
             self.cfg.set("calaplayer_builder_exe", self.builder_row.text())
+            self.cfg.set("calabiyau_exe", self.calabiyau_row.text())
             self.cfg.set("audition_exe", self.audition_row.text())
             self.cfg.set("output_dir", self.output_row.text())
             self.cfg.set("port", int(self.port.value()))
@@ -374,18 +396,18 @@ class SettingsPage(QWidget):
             return
         chosen = values[0]
         if auto_first:
-            self._set_field(field, chosen)
-            self.log.emit("已按优先级选中：%s" % chosen)
+            self._persist_detected(field, chosen)
+            self.log.emit("已按优先级选中并保存：%s" % chosen)
             for position, value in enumerate(values[:5], start=1):
                 self.log.emit("  候选%d：%s" % (position, value))
-            self.check_hint.setText("已选中 %s（记得点「保存设置」）" % os.path.basename(chosen))
+            self.check_hint.setText("已选中并保存 %s" % os.path.basename(chosen))
             return
         if len(values) > 1:
             chosen, accepted = QInputDialog.getItem(self, "请选择", "找到多个候选，请选择一个：", values, 0, False)
             if not accepted:
                 return
-        self._set_field(field, chosen)
-        self.log.emit("已填入候选路径（记得点「保存设置」）：%s" % chosen)
+        self._persist_detected(field, chosen)
+        self.log.emit("已填入并保存候选路径：%s" % chosen)
 
     def _set_field(self, field: str, value: str) -> None:
         if field == "sovits_root":
@@ -396,10 +418,48 @@ class SettingsPage(QWidget):
             self.calaplayer_row.set_text(value)
         elif field == "calaplayer_builder_exe":
             self.builder_row.set_text(value)
+        elif field == "calabiyau_exe":
+            self.calabiyau_row.set_text(value)
         elif field == "audition_exe":
             self.audition_row.set_text(value)
         elif field == "output_dir":
             self.output_row.set_text(value)
+
+    def _field_value(self, key: str) -> str:
+        row = {
+            "sovits_root": self.sovits_row,
+            "material_root": self.material_row,
+            "calaplayer_exe": self.calaplayer_row,
+            "calaplayer_builder_exe": self.builder_row,
+            "calabiyau_exe": self.calabiyau_row,
+            "audition_exe": self.audition_row,
+            "output_dir": self.output_row,
+        }.get(key)
+        return row.text() if row is not None else ""
+
+    @staticmethod
+    def _field_valid(key: str, value: str) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        target = Path(text)
+        try:
+            if key in ("calaplayer_exe", "calaplayer_builder_exe", "audition_exe"):
+                return target.is_file()
+            return target.is_file() or target.is_dir()
+        except OSError:
+            return False
+
+    def _persist_detected(self, field: str, value: str) -> None:
+        """检测/选择成功后立刻写进配置与缓存，下次启动不用再点检测。"""
+        self._set_field(field, value)
+        try:
+            self.cfg.set(field, value)
+            paths.remember_detected(self.cfg, field, value)
+        except Exception as exc:
+            self.log.emit("保存路径失败：%s" % friendly_error(exc))
+            return
+        self.settings_saved.emit()
 
     def detect_sovits(self) -> None:
         roots = self._roots()
@@ -424,6 +484,66 @@ class SettingsPage(QWidget):
         self._detect_calaplayer(
             "calaplayer_builder_exe", "builder", "没有找到打包工具 CalaPlayerSrcmBuilderGUI.exe，请手动选择。"
         )
+
+    def detect_calabiyau(self) -> None:
+        discover = getattr(paths, "discover_calabiyau", None)
+        if not callable(discover):
+            QMessageBox.information(
+                self, "暂不支持自动检测", "当前版本还不支持自动查找 CalabiYauVoice，请手动选择。"
+            )
+            return
+        self._run_detect(
+            "calabiyau_exe",
+            lambda progress: discover(self.cfg, progress=progress),
+            "没有找到 CalabiYauVoice_GUI.exe，请手动选择 exe 或它所在的文件夹。",
+            auto_first=True,
+        )
+
+    def detect_all_tools(self) -> None:
+        """一键把 4 个外部工具路径全部找出来并自动保存（不用逐项点自动检测）。"""
+        if self._worker is not None and self._worker.isRunning():
+            self.log.emit("上一次检测还没结束，请稍候。")
+            return
+        discover = getattr(paths, "detect_all", None)
+        if not callable(discover):
+            QMessageBox.information(self, "暂不支持自动检测", "当前版本还不支持一键检测外部工具。")
+            return
+        self._worker = TaskWorker(
+            lambda progress: discover(self.cfg, progress=progress), pass_progress=True, parent=self
+        )
+        self._worker.progress.connect(self.log.emit)
+        self._worker.done.connect(self._on_detect_tools_done)
+        self._worker.failed.connect(self._on_detect_failed)
+        self.log.emit("正在一键检测外部工具（游戏 CalaPlayer / 打包工具 / CalabiYau / AU）…")
+        self._worker.start()
+
+    def _on_detect_tools_done(self, result) -> None:
+        detected = result if isinstance(result, dict) else {}
+        tool_keys = list(getattr(paths, "TOOL_KEYS", ()) or ())
+        labels = getattr(paths, "TOOL_LABELS", {}) or {}
+        applied = 0
+        for key in tool_keys:
+            values = [str(value) for value in (detected.get(key) or []) if str(value).strip()]
+            label = str(labels.get(key) or key)
+            if not values:
+                self.log.emit("%s：没有找到候选" % label)
+                continue
+            current = self._field_value(key)
+            keep = current if self._field_valid(key, current) else values[0]
+            self._persist_detected(key, keep)
+            applied += 1
+            self.log.emit("%s：已填入 %s（共 %d 个候选）" % (label, keep, len(values)))
+            for position, value in enumerate(values[:5], start=1):
+                self.log.emit("  候选%d：%s" % (position, value))
+        if applied:
+            try:
+                self.cfg.save()
+            except Exception:
+                pass
+            self.check_hint.setText("已自动填入 %d 项外部工具路径并保存。" % applied)
+            self.log.emit("一键检测完成：%d 项已填入并保存，下次启动直接可用。" % applied)
+        else:
+            self.log.emit("一键检测完成：没有找到可用路径，请手动选择。")
 
     def detect_audition(self) -> None:
         discover = getattr(paths, "discover_audition", None)

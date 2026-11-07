@@ -18,4 +18,10 @@ def capabilities() -> dict:
         "discover_calaplayer": True,
         "discover_audition": True,
         "output_dir_resolver": True,
+        # 2026-11-07 修订：外部工具一键检测 + 检测缓存 + CalabiYau 接入 + 一键放入 AU
+        "detect_cache": True,
+        "detect_all_tools": True,
+        "calabiyau_link": True,
+        "au_handoff": True,
+        "quick_effects": True,
     }
