@@ -984,6 +984,30 @@ def ensure_calabiyau_prefs(cfg, output_dir: str = "") -> dict:
     return {"path": str(prefs), "changed": changed, "skipped": "", "saved": True}
 
 
+def calabiyau_temp_dir(cfg) -> str:
+    """给 CalabiYauVoice（Java/JNA）准备一个一定可写的临时目录，避免系统 TEMP 权限问题。"""
+    target = Path(cfg.data_dir) / "tmp" / "calabiyau"
+    target.mkdir(parents=True, exist_ok=True)
+    return str(target)
+
+
+def calabiyau_launch_env(cfg) -> dict:
+    """启动 CalabiYauVoice 用的环境变量：TEMP/TMP + JAVA_TOOL_OPTIONS 指向软件内临时目录。
+
+    Java 的 JNA 会把 jnidispatch.dll 解压到 java.io.tmpdir/jna.tmpdir；系统 TEMP 不可写
+    （或进程完整性级别较低）时会报 "Failed to create temporary file ... 拒绝访问"。
+    这里强制指到 <app_dir>/data/tmp/calabiyau，软件目录一定可写。
+    """
+    temp_dir = calabiyau_temp_dir(cfg)
+    env = dict(os.environ)
+    env["TEMP"] = temp_dir
+    env["TMP"] = temp_dir
+    options = "-Djava.io.tmpdir=%s -Djna.tmpdir=%s -Djna.nosys=true" % (temp_dir, temp_dir)
+    existing = str(env.get("JAVA_TOOL_OPTIONS") or "").strip()
+    env["JAVA_TOOL_OPTIONS"] = (existing + " " + options).strip() if existing else options
+    return env
+
+
 def detect_all(cfg, progress=None, full_scan: bool = True) -> dict:
     """一次性探测全部外部工具，返回 {key: [候选路径...]}（key 见 TOOL_KEYS）。
 

@@ -1,6 +1,6 @@
 """CalaVoiceStudio core 层（纯 Python，不依赖 PySide6）。"""
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 def capabilities() -> dict:

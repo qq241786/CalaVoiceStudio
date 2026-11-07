@@ -1,6 +1,6 @@
 # CalaVoiceStudio · 卡拉语音工作室
 
-**v0.2.0** · Windows · MIT
+**v0.2.1** · Windows · MIT
 
 写台词 → 选人声 → 调本机 GPT-SoVITS 合成 → 导出 CalaPlayer 素材规范的 48 kHz wav → 一键打开打包工具。
 全部操作在一个窗口里完成，零命令行。生成的语音可以**一键放进 Adobe Audition** 加混响/延迟，
@@ -12,7 +12,7 @@
 ![设置页（三个外部工具 + 一键检测）](docs/screenshot_settings.png)
 
 > 想直接用：到 [Releases](https://github.com/qq241786/CalaVoiceStudio/releases) 下载
-> `CalaVoiceStudio-0.2.0-win64.zip`，解压后双击 `CalaVoiceStudio.exe`。
+> `CalaVoiceStudio-0.2.1-win64.zip`，解压后双击 `CalaVoiceStudio.exe`。
 > 前置条件只有一个：**本机已装好 GPT-SoVITS**（含它自带的 `runtime\python.exe` 与 `ffmpeg.exe`）。
 
 - 协议：[MIT](LICENSE)（随便改、随便商用，出问题别找我）

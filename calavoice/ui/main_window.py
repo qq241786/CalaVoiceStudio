@@ -535,6 +535,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "文件不存在", "找不到%s：\n%s" % (label, target))
             self._refresh_calaplayer_buttons()
             return
+        env = None
         if key == "calabiyau_exe":
             # 顺手把它默认的保存/转换目录补到本软件的语音输出目录（只补空缺，不覆盖用户设置）
             try:
@@ -548,8 +549,15 @@ class MainWindow(QMainWindow):
                 )
             elif link.get("skipped"):
                 self.append_log("CalabiYau 配置未改动：%s" % link["skipped"])
+            # Java/JNA 需要可写的临时目录：指到软件 data\tmp，避免 %TEMP% 权限问题
+            try:
+                env = paths.calabiyau_launch_env(self.cfg)
+                self.append_log("已为 CalabiYau 指定可写临时目录：%s" % env.get("TEMP"))
+            except Exception as exc:
+                env = None
+                self.append_log("准备 CalabiYau 临时目录失败（继续用系统 TEMP）：%s" % friendly_error(exc))
         try:
-            pid = launcher.launch_target(target)
+            pid = launcher.launch_target(target, env=env)
         except Exception as exc:
             QMessageBox.warning(self, "启动失败", friendly_error(exc))
             return

@@ -31,8 +31,8 @@ def open_folder(path: str) -> None:
         raise LauncherError("无法打开目录 %s：%s" % (target, exc))
 
 
-def launch_exe(exe_path: str, args=None) -> int:
-    """启动传入的 exe（可带参数），返回进程 pid。"""
+def launch_exe(exe_path: str, args=None, env=None) -> int:
+    """启动传入的 exe（可带参数/自定义环境变量），返回进程 pid。"""
     text = str(exe_path or "").strip()
     if not text:
         raise LauncherError("程序路径为空，请先在设置页选择对应程序")
@@ -48,6 +48,7 @@ def launch_exe(exe_path: str, args=None) -> int:
         process = subprocess.Popen(
             command,
             cwd=str(target.parent),
+            env=env,
             close_fds=True,
         )
     except OSError as exc:
@@ -55,14 +56,14 @@ def launch_exe(exe_path: str, args=None) -> int:
     return int(process.pid)
 
 
-def launch_target(target_path: str) -> int:
+def launch_target(target_path: str, env=None) -> int:
     """启动一个 exe，或用文件管理器打开一个文件夹（自动判断）。返回 pid（打开文件夹时为 0）。"""
     text = str(target_path or "").strip()
     if not text:
         raise LauncherError("路径为空")
     target = Path(text)
     if target.is_file():
-        return launch_exe(str(target))
+        return launch_exe(str(target), env=env)
     if target.is_dir():
         open_folder(str(target))
         return 0
