@@ -3,7 +3,7 @@
 
 用法：
     python main.py           启动图形界面
-    python main.py --smoke   无界面自检（构建主窗口与三个页面后立即退出）
+    python main.py --smoke   无界面自检（构建主窗口与四个页面后立即退出）
 
 自检结果会写到 <app_dir>\\data\\smoke_result.txt，因为 PyInstaller windowed exe 没有 stdout。
 """

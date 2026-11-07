@@ -294,6 +294,16 @@ def _sliders(painter: QPainter, accent: str, color: str) -> None:
         painter.drawEllipse(QRectF(x - 1.5, y - 1.5, 3.0, 3.0))
 
 
+def _download(painter: QPainter, accent: str, color: str) -> None:
+    """向下箭头 + 托盘：表示"下载"。"""
+    _pen(painter, color, 1.5)
+    painter.drawLine(QPointF(8.0, 2.4), QPointF(8.0, 9.4))
+    painter.drawLine(QPointF(8.0, 9.6), QPointF(5.1, 6.8))
+    painter.drawLine(QPointF(8.0, 9.6), QPointF(10.9, 6.8))
+    _pen(painter, accent, 1.5)
+    painter.drawLine(QPointF(3.2, 12.6), QPointF(12.8, 12.6))
+
+
 _ICON_DRAWERS = {
     "folder": _folder,
     "folder_plus": _folder_plus,
@@ -311,6 +321,7 @@ _ICON_DRAWERS = {
     "computer": _computer,
     "link": _link,
     "sliders": _sliders,
+    "download": _download,
 }
 
 
@@ -682,24 +693,53 @@ def dark_palette() -> QPalette:
     return palette
 
 
-def chevron_icon() -> str:
-    """运行时画一个青色小三角给 QSS 的 url() 用（写系统临时目录，不写死任何本机路径）。"""
-    target = Path(tempfile.gettempdir()) / "calavoice_ui" / "chevron_down.png"
+def _chevron_candidates() -> list[Path]:
+    """chevron 小图的可写目录候选：软件 data/ui → 系统临时目录 → 用户目录。
+
+    优先 data/ui（配置目录一定可写、且不会在成品根目录留下杂物）；
+    某些机器 TEMP 不可写/不存在（tempfile.gettempdir() 会直接抛错），不能让它拖垮启动。
+    """
+    candidates: list[Path] = []
     try:
-        if not target.is_file():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            pixmap = QPixmap(10, 6)
-            pixmap.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(CYAN))
-            painter.drawPolygon(QPolygonF([QPointF(0.0, 1.0), QPointF(10.0, 1.0), QPointF(5.0, 6.0)]))
-            painter.end()
-            pixmap.save(str(target), "PNG")
-        return target.as_posix() if target.is_file() else ""
+        if getattr(sys, "frozen", False):
+            base = Path(sys.executable).resolve().parent
+        else:
+            base = Path(__file__).resolve().parents[2]
+        candidates.append(base / "data" / "ui")
     except Exception:
-        return ""
+        pass
+    try:
+        candidates.append(Path(tempfile.gettempdir()) / "calavoice_ui")
+    except Exception:
+        pass
+    try:
+        candidates.append(Path.home() / ".calavoice_ui")
+    except Exception:
+        pass
+    return candidates
+
+
+def chevron_icon() -> str:
+    """运行时画一个青色小三角给 QSS 的 url() 用（写临时目录，失败逐级回退，不写死本机路径）。"""
+    for folder in _chevron_candidates():
+        target = Path(folder) / "chevron_down.png"
+        try:
+            if not target.is_file():
+                folder.mkdir(parents=True, exist_ok=True)
+                pixmap = QPixmap(10, 6)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(CYAN))
+                painter.drawPolygon(QPolygonF([QPointF(0.0, 1.0), QPointF(10.0, 1.0), QPointF(5.0, 6.0)]))
+                painter.end()
+                pixmap.save(str(target), "PNG")
+            if target.is_file():
+                return target.as_posix()
+        except Exception:
+            continue
+    return ""
 
 
 def build_qss() -> str:

@@ -1,17 +1,18 @@
 # CalaVoiceStudio · 卡拉语音工作室
 
-**v0.1.0** · Windows · MIT
+**v0.2.0** · Windows · MIT
 
 写台词 → 选人声 → 调本机 GPT-SoVITS 合成 → 导出 CalaPlayer 素材规范的 48 kHz wav → 一键打开打包工具。
 全部操作在一个窗口里完成，零命令行。生成的语音可以**一键放进 Adobe Audition** 加混响/延迟，
 也可以直接用软件内置的「快速效果」原地套混响、延迟、音量标准化。
+**四页 GUI**：台词生成 / 人声档案 / 设置 / 下载·依赖（依赖下载链接都收在软件里，点按钮就能下）。
 
 ![界面截图](docs/screenshot.png)
 
 ![设置页（三个外部工具 + 一键检测）](docs/screenshot_settings.png)
 
 > 想直接用：到 [Releases](https://github.com/qq241786/CalaVoiceStudio/releases) 下载
-> `CalaVoiceStudio-0.1.0-win64.zip`，解压后双击 `CalaVoiceStudio.exe`。
+> `CalaVoiceStudio-0.2.0-win64.zip`，解压后双击 `CalaVoiceStudio.exe`。
 > 前置条件只有一个：**本机已装好 GPT-SoVITS**（含它自带的 `runtime\python.exe` 与 `ffmpeg.exe`）。
 
 - 协议：[MIT](LICENSE)（随便改、随便商用，出问题别找我）
@@ -79,6 +80,23 @@
    （顶栏「打开输出目录」始终打开最终生效的那个）。每行都是 手填 + 浏览 + 自动检测 三通道。
 6. 端口默认 9880（被占用就改一个），默认版本 v2ProPlus、设备 cuda。
 7. 点「手动检测」或「自动检测」，确认 **12 项检查**全部通过。
+
+## 二·五、下载 / 依赖页（0.2.0 新增）
+
+第四个标签页把免费工具的官方下载地址收进了软件里，点按钮就用默认浏览器打开：
+音频/压缩包直链会直接开始下载，发布页/网盘页会打开对应页面。
+
+| 分组 | 内容 |
+| --- | --- |
+| GPT-SoVITS | 官方整合包（HuggingFace）、50 系显卡特供、魔搭满速直链、hf-mirror 镜像、百度网盘、发布页 |
+| CalaPlayerSrcmBuilder | v1.2.1 发布页、GUI 精简版直链、CLI 版直链、GUI 完全体（百度网盘 / Google Drive） |
+| CalabiYauVoice_GUI | v2.0.2 发布页、Windows zip 直链、项目主页 |
+| CalaVoiceStudio | 本软件发布页、项目主页 |
+
+页面底部注明：**游戏本体与 Adobe Audition 不在列表里**，请通过 Steam / Adobe 官方安装。
+链接全部是官方或作者发布的地址，软件本身不下载、不捆绑任何文件。
+
+![下载 / 依赖页](docs/screenshot_downloads.png)
 
 ## 三、人声档案页
 
@@ -163,6 +181,7 @@ python selftest.py --ref 参考.wav --ref-text "参考文本"   :: 加跑一次�
 
 | 现象 | 处理 |
 | --- | --- |
+| 不知道去哪下载 GPT-SoVITS / 打包工具 / CalabiYau | 打开软件「下载 / 依赖」页，点「直接下载」或「打开页面」 |
 | 检测不到 GPT-SoVITS | 确认目录下有 `api_v2.py` 和 `runtime\python.exe`；用浏览手选 |
 | 检测不到 CalaPlayer / 打包工具 / CalabiYau | 设置页点「一键检测外部工具」，一次补齐四项并保存；仍找不到就浏览手选 |
 | 每次启动都要重新检测工具路径 | 正常版本不会：检测结果会写进 `data\detect_cache.json` 并在启动时秒命中；若缓存文件被删（或路径搬家），首次会重扫一次 |

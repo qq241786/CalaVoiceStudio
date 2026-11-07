@@ -69,6 +69,22 @@ def launch_target(target_path: str) -> int:
     raise LauncherError("路径不存在：%s" % target)
 
 
+def open_url(url: str) -> None:
+    """用系统默认浏览器打开 http(s) 链接（下载页按钮用）。"""
+    text = str(url or "").strip()
+    if not text.lower().startswith(("http://", "https://")):
+        raise LauncherError("只支持 http/https 链接：%s" % text)
+    try:
+        if hasattr(os, "startfile"):
+            os.startfile(text)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", text])
+        else:
+            subprocess.Popen(["xdg-open", text])
+    except OSError as exc:
+        raise LauncherError("无法打开链接 %s：%s" % (text, exc))
+
+
 def open_in_tool(exe_path: str, files) -> int:
     """用一个外部程序（例如 Adobe Audition）打开若干音频文件，返回进程 pid。"""
     items = [str(item or "").strip() for item in (files or [])]

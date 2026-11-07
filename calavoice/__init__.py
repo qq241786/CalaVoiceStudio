@@ -1,6 +1,6 @@
 """CalaVoiceStudio core 层（纯 Python，不依赖 PySide6）。"""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def capabilities() -> dict:
@@ -24,4 +24,6 @@ def capabilities() -> dict:
         "calabiyau_link": True,
         "au_handoff": True,
         "quick_effects": True,
+        # 0.2.0：软件内下载 / 依赖页
+        "download_center": True,
     }

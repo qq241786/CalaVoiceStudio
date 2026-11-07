@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from calavoice import launcher, paths
 from calavoice.tts_engine import TTSEngine
+from calavoice.ui.page_downloads import DownloadsPage
 from calavoice.ui.page_profiles import ProfilesPage
 from calavoice.ui.page_script import ScriptPage
 from calavoice.ui.page_settings import SettingsPage
@@ -54,7 +55,15 @@ class MainWindow(QMainWindow):
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
         self.cfg = cfg
-        self.setWindowTitle("CalaVoiceStudio · 卡拉语音工作室")
+        try:
+            import calavoice as _calavoice
+
+            _version = str(getattr(_calavoice, "__version__", "") or "")
+        except Exception:
+            _version = ""
+        self.setWindowTitle(
+            "CalaVoiceStudio · 卡拉语音工作室" + ((" v%s" % _version) if _version else "")
+        )
         self.setWindowIcon(app_icon())
         self.resize(1200, 820)
         self.setMinimumSize(1000, 660)
@@ -202,9 +211,11 @@ class MainWindow(QMainWindow):
         self.script_page = ScriptPage(self.cfg, self.engine, self)
         self.profiles_page = ProfilesPage(self.cfg, self.engine, self)
         self.settings_page = SettingsPage(self.cfg, self)
+        self.downloads_page = DownloadsPage(self.cfg, self)
         self.tabs.addTab(self.script_page, "台词生成")
         self.tabs.addTab(self.profiles_page, "人声档案")
         self.tabs.addTab(self.settings_page, "设置")
+        self.tabs.addTab(self.downloads_page, "下载 / 依赖")
         self.setCentralWidget(self.tabs)
         self.tabs.setCurrentIndex(0)
 
@@ -234,6 +245,7 @@ class MainWindow(QMainWindow):
         self.settings_page.log.connect(self.append_log)
         self.settings_page.check_requested.connect(self.run_check)
         self.settings_page.settings_saved.connect(self._on_settings_saved)
+        self.downloads_page.log.connect(self.append_log)
 
     # ---------- 日志 ----------
 
